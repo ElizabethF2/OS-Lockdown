@@ -1,0 +1,33 @@
+#!/bin/sh
+
+msg="Switch GPU between your VM and host machine?"
+msg="$(printf '%s\n\n%s' \
+        "$(alt_os_util check_gpu)" "$msg")"
+
+python - <<EOF
+import sys, qtpy.QtWidgets
+a = qtpy.QtWidgets.QApplication(sys.argv)
+m = qtpy.QtWidgets.QMessageBox()
+r = m.question(m,
+               'GPU Switcher',
+               '''$msg''',
+               m.StandardButton.Yes | m.StandardButton.No)
+sys.exit(101 if r == m.StandardButton.Yes else 9)
+EOF
+ret="$?"
+
+if [ "$ret" != "101" ] && [ "$ret" != "9" ] ; then
+  echo "WARNING: Unable to use Python or QtPY. Falling back to xmessage" >&2
+  xmessage \
+   -title 'GPU Switcher' \
+   -buttons Yes,No \
+   "$msg" 2> /dev/null
+  ret=$?
+fi
+
+if [ "$ret" != "101" ]; then
+  exit 1
+fi
+
+alt_os_util switch_gpu
+${SHELL:-sh}

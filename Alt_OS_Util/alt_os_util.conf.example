@@ -1,0 +1,26 @@
+#!/bin/sh
+
+VIDEO_DRIVER="amdgpu"
+AUDIO_DRIVER="snd_hda_intel"
+VIDEO_DEVICE="0000:03:00.0"
+AUDIO_DEVICE="0000:03:00.1"
+VIDEO_ID="1002 744c"
+AUDIO_ID="1002 ab30"
+BAR0_SIZE=14
+BAR2_SIZE=8
+
+# Time in seconds to wait for the BAR to resize
+# RESIZE_BAR_WAIT_TIME=10
+
+# The session type SDDM will use when logging back in after rebooting
+# SDDM_SESSION="plasma"
+
+# A regex pattern that matches the name of process(es) that will be present after login
+# SDDM_SESSION_PATTERN="plasma"
+
+# A regex pattern that matches the names of all processes could be using the GPU
+# DM_PATTERN="plasma|sddm"
+
+# Uncomment to SKIP removing the EFI entries Window's boot loader can create
+# Leaving this commented prevents Windows from making itself the default OS
+# IGNORE_WINDOWS_BOOT_MANAGER=1

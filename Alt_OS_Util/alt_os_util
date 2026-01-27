@@ -1,0 +1,133 @@
+#!/bin/sh
+
+RESIZE_BAR_WAIT_TIME=10
+SDDM_SESSION="plasma"
+SDDM_SESSION_PATTERN="plasma"
+DM_PATTERN="plasma|sddm"
+USER_STATE_FILE="/root/.local/state/alt_os_util_autologin_user"
+GPU_STATE_FILE="/root/.local/state/alt_os_util_use_gpu_for_vfio"
+SDDM_TMP_OVERRIDE_PATH="/tmp/sddm_conf_autologin_override"
+SDDM_DST_OVERRIDE_PATH="/etc/sddm.conf.d/kde_settings.conf"
+
+load_conf ()
+{
+  conf="$(cat /etc/alt_os_util.conf)"
+  if [ "$?" = "0" ]; then
+    eval "$conf"
+  else
+    echo "Error: Unable to load config." >&2
+    exit 1
+  fi
+}
+
+set_auto_login ()
+{
+  conf="$(cat "$SDDM_DST_OVERRIDE_PATH")"
+  conf="$(echo "$conf" | sed 's/Relogin=\w*/Relogin=true/')"
+  conf="$(echo "$conf" | sed "s/Session=\w*/Session=$SDDM_SESSION/")"
+  conf="$(echo "$conf" | sed "s/User=\w*/User=$1/")"
+  echo "$conf" > $SDDM_TMP_OVERRIDE_PATH
+  mount --bind "$SDDM_TMP_OVERRIDE_PATH" "$SDDM_DST_OVERRIDE_PATH"
+}
+
+cleanup_auto_login ()
+{
+  while ! pgrep "$SDDM_SESSION_PATTERN" > /dev/null; do
+    sleep 1
+  done
+  umount "$SDDM_DST_OVERRIDE_PATH"
+}
+
+case $1 in
+  service)
+    load_conf
+    rm "$GPU_STATE_FILE" 2> /dev/null
+    if [ "$?" = "0" ]; then
+      modprobe -r "$VIDEO_DRIVER"
+      modprobe -r "$AUDIO_DRIVER"
+      modprobe vfio-pci
+      echo vfio-pci > /sys/bus/pci/devices/$VIDEO_DEVICE/driver_override
+      echo vfio-pci > /sys/bus/pci/devices/$AUDIO_DEVICE/driver_override
+      modprobe "$AUDIO_DRIVER"
+      modprobe "$VIDEO_DRIVER"
+      echo "$BAR0_SIZE" > /sys/bus/pci/devices/$VIDEO_DEVICE/resource0_resize
+      echo "$BAR2_SIZE" > /sys/bus/pci/devices/$VIDEO_DEVICE/resource2_resize
+      sleep $RESIZE_BAR_WAIT_TIME
+      echo "$VIDEO_ID" > /sys/bus/pci/drivers/vfio-pci/new_id
+      echo "$AUDIO_ID" > /sys/bus/pci/drivers/vfio-pci/new_id
+    fi
+    autologin_user="$(cat "$USER_STATE_FILE" 2> /dev/null)"
+    if [ "x$autologin_user" != "x" ]; then
+      rm "$USER_STATE_FILE"
+      set_auto_login "$autologin_user"
+      systemd-run -- "$0" "remove_autologin_bind_mount"
+    fi
+    if [ "x$IGNORE_WINDOWS_BOOT_MANAGER" == "x" ]; then
+      efibootmgr --label 'Windows Boot Manager' --delete-bootnum || true
+    fi
+    ;;
+  switch_gpu)
+    # wayland_session_helper save || exit $?
+    sudo /usr/bin/systemd-run -- "$0" "switch_gpu_inner" "$USER"
+    ;;
+  check_gpu)
+    if [ "$(cat /sys/bus/pci/devices/$VIDEO_DEVICE/driver_override)" = "(null)" ]; then
+      echo "Host machine has dGPU"
+      exit 0
+    else
+      echo "VM has dGPU"
+      exit 1
+    fi
+    ;;
+  switch_gpu_inner)
+    load_conf
+    if [ "$(cat /sys/bus/pci/devices/$VIDEO_DEVICE/driver_override)" = "(null)" ]; then
+      mkdir -p "$(dirname "$USER_STATE_FILE")"
+      echo "$2" > $USER_STATE_FILE
+      echo "1" > $GPU_STATE_FILE
+      reboot
+    else
+      systemctl stop display-manager.service
+      while pgrep "$DM_PATTERN" > /dev/null; do
+        sleep 1
+      done
+      echo $VIDEO_DEVICE > /sys/bus/pci/drivers/vfio-pci/unbind
+      echo $AUDIO_DEVICE > /sys/bus/pci/drivers/vfio-pci/unbind
+      echo > /sys/bus/pci/devices/$VIDEO_DEVICE/driver_override
+      echo > /sys/bus/pci/devices/$AUDIO_DEVICE/driver_override
+      echo "1" > /sys/bus/pci/devices/$VIDEO_DEVICE/remove
+      echo "1" > /sys/bus/pci/devices/$AUDIO_DEVICE/remove
+      modprobe -r vfio-pci
+      modprobe -r "$VIDEO_DRIVER"
+      modprobe -r "$AUDIO_DRIVER"
+      echo "1" > /sys/bus/pci/rescan
+      drm_before="$(ls /sys/class/drm)"
+      modprobe "$AUDIO_DRIVER"
+      modprobe "$VIDEO_DRIVER"
+      while [ "$drm_before" = "$(ls /sys/class/drm)" ]; do
+        sleep 1
+      done
+      set_auto_login "$2"
+      systemctl start display-manager.service
+      cleanup_auto_login
+    fi
+    ;;
+  remove_autologin_bind_mount)
+    load_conf
+    cleanup_auto_login
+    ;;
+  help|--help|-h|'')
+    echo "Usage: $(basename "$0") switch_gpu"
+    echo "Toggles your dGPU between your VM and host machine"
+    echo
+    echo "Usage: $(basename "$0") check_gpu"
+    echo "Checks which machine has the dGPU"
+    echo
+    echo "See the included readme for additional information."
+    echo "The readme covers setup and configuration."
+    ;;
+  *)
+    echo "Invalid command: $1" >&2
+    exit 1
+    ;;
+esac

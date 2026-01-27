@@ -1,0 +1,76 @@
+#!/bin/sh
+
+VIDEO_DEVICE="0000:03:00.0"
+AUDIO_DEVICE="0000:03:00.1"
+VIDEO_ID="1002 744c"
+AUDIO_ID="1002 ab30"
+BAR0_SIZE=14
+BAR2_SIZE=8
+
+SDDM_SESSION="plasma"
+SDDM_TMP_OVERRIDE_PATH="/tmp/sddm_conf_autologin_override"
+
+if [ "$1" != "inner" ]; then
+  wayland_session_helper save || exit $?
+  sudo /usr/bin/systemd-run -- "$0" "inner" "$USER"
+else
+  if [ "$(cat /sys/bus/pci/devices/$VIDEO_DEVICE/driver_override)" = "(null)" ]; then
+    if [ -e "$SDDM_TMP_OVERRIDE_PATH" ]; then
+      reboot
+      exit 0
+    fi
+    echo Giving dGPU to VM
+    sleep 2 # TODO remove this
+    modprobe vfio-pci
+    systemctl stop display-manager.service
+    sleep 10
+    modprobe -r amdgpu
+    modprobe -r snd_hda_intel
+    sleep 10 # TODO fix this
+    echo vfio-pci > /sys/bus/pci/devices/$VIDEO_DEVICE/driver_override
+    echo vfio-pci > /sys/bus/pci/devices/$AUDIO_DEVICE/driver_override
+    sleep 1
+    modprobe snd_hda_intel
+    modprobe amdgpu
+    sleep 1
+    echo "$BAR0_SIZE" > /sys/bus/pci/devices/$VIDEO_DEVICE/resource0_resize
+    echo "$BAR2_SIZE" > /sys/bus/pci/devices/$VIDEO_DEVICE/resource2_resize
+    sleep 5
+    echo "$VIDEO_ID" > /sys/bus/pci/drivers/vfio-pci/new_id
+    echo "$AUDIO_ID" > /sys/bus/pci/drivers/vfio-pci/new_id
+  else
+    echo Taking back dGPU from VM
+    sleep 2 # TODO remove this
+    systemctl stop display-manager.service
+    sleep 10
+    echo $VIDEO_DEVICE > /sys/bus/pci/drivers/vfio-pci/unbind
+    echo $AUDIO_DEVICE > /sys/bus/pci/drivers/vfio-pci/unbind
+    sleep 3
+    echo > /sys/bus/pci/devices/$VIDEO_DEVICE/driver_override
+    echo > /sys/bus/pci/devices/$AUDIO_DEVICE/driver_override
+    sleep 3
+    echo "1" > /sys/bus/pci/devices/$VIDEO_DEVICE/remove
+    echo "1" > /sys/bus/pci/devices/$AUDIO_DEVICE/remove
+    sleep 3
+    modprobe -r vfio-pci
+    modprobe -r amdgpu
+    modprobe -r snd_hda_intel
+    sleep 3
+    echo "1" > /sys/bus/pci/rescan
+    sleep 3
+    modprobe snd_hda_intel
+    modprobe amdgpu
+  fi
+  fmt='[Autologin]\nRelogin=true\nSession=%s\nUser=%s\n'
+  dst_path="/etc/sddm.conf.d/kde_settings.conf"
+  conf="$(cat "$dst_path")"
+  conf="$(echo "$conf" | sed 's/Relogin=\w*/Relogin=true/')"
+  conf="$(echo "$conf" | sed "s/Session=\w*/Session=$SDDM_SESSION/")"
+  conf="$(echo "$conf" | sed "s/User=\w*/User=$2/")"
+  echo "$conf" > $SDDM_TMP_OVERRIDE_PATH
+  mount --bind "$SDDM_TMP_OVERRIDE_PATH" "$dst_path"
+  sleep 15
+  systemctl start display-manager.service
+  sleep 5
+  umount "$dst_path"
+fi

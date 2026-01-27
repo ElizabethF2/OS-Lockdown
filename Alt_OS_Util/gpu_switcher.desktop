@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=GPU Switcher
+GenericName=Virtualization Utility
+Comment=Switch a GPU between a virtual machine and real hardware
+
+Icon=show-gpu-effects-symbolic
+Type=Application
+Categories=System;Development;Emulator;
+Keywords=virtual;virtualization;gpu;vm;virtual machine;windows;vfio;
+
+Exec=gpu_switcher
+Terminal=true
+StartupNotify=false

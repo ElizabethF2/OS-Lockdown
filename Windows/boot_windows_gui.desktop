@@ -1,0 +1,13 @@
+[Desktop Entry]
+Name=Windows
+GenericName=Dual-Boot Utility
+Comment=Reboot to Windows
+
+Icon=folder-windows-symbolic
+Type=Application
+Categories=System;Development;
+Keywords=dual boot;dual-boot;windows;
+
+Exec=konsole --new-tab -e boot_windows_gui
+Terminal=true
+StartupNotify=false

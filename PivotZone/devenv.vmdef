@@ -1,0 +1,327 @@
+#!/bin/env python3
+
+# Virtuator can be installed from https://github.com/ElizabethF2/Virtuator
+# Run this script with ./devenv.vmdef call test
+
+VMDEF_VERSION = 1
+NAME = 'pivotzone'
+ARCH = ['x86_64']
+MEMORY = '16G'
+DISKS = [{'SIZE':'50G'}]
+NETWORK = 'user'
+GRAPHICS = True
+REQUIRES = 'arch_linux_with_ssh'
+
+_BUILD_SCRIPT_1 = '''
+  chroot _CHROOT bash arch-chroot / bash <<ARCHROOTEOF || exit $?
+    echo ------------------------------------
+    echo Installing packages from mypivotzone
+    echo ------------------------------------
+    pacman -Syu --needed --noconfirm PKGS || exit $?
+    echo
+
+    echo ----------------
+    echo Setting hostname
+    echo ----------------
+    printf "pivotzonedev" > /etc/hostname || exit $?
+    echo
+
+    echo ----------------
+    echo Setting password
+    echo ----------------
+    echo "pivotzonedev" | passwd root --stdin || exit $?
+    echo
+  ARCHROOTEOF
+
+  echo ------------------------------------------------
+  echo Dowloading auto_tpm_encrypt if not already on VM
+  echo ------------------------------------------------
+  stat /tmp/auto_tpm_encrypt.py || download_file TODO /tmp/auto_tpm_encrypt.py || exit $?
+  echo
+
+  echo --------------
+  echo Unmounting EFI
+  echo --------------
+  unmount_disk_at 0 0 || exit $?
+  echo
+
+  echo ---------------
+  echo Unmounting Root
+  echo ---------------
+  unmount_disk_at 0 1 || exit $?
+  echo
+
+  echo ---------------------
+  echo Setting up disk tools
+  echo ---------------------
+  ensure_has e2fsprogs-extra || exit $?
+  echo
+
+  echo -----------------------
+  echo Checking root partition
+  echo -----------------------
+  e2fsck -p -f "$(get_disk_at 0 1)" || exit $?
+  echo
+
+  echo -------------------------
+  echo Shrinking root filesystem
+  echo -------------------------
+  resize2fs "$(get_disk_at 0 1)" 5G || exit $?
+  echo
+'''
+
+_BUILD_SCRIPT_2 = '''
+  echo -----------------------------
+  echo Creating a 2nd root partition
+  echo -----------------------------
+  parted "$(get_disk_at 0)" --script mkpart primary ext4 5G 10G || exit $?
+  echo
+
+  echo -----------------------------
+  echo Formatting 2nd root partition
+  echo -----------------------------
+  mkfs.ext4 "$(get_disk_at 0 2)" || exit $?
+  echo
+
+  echo ---------------------------
+  echo Growing 1st root filesystem
+  echo ---------------------------
+  resize2fs "$(get_disk_at 0 1)" || exit $?
+  echo
+
+  echo --------------------------
+  echo Remount 1st root partition
+  echo --------------------------
+  mount_disk_at 0 1 _CHROOT || exit $?
+  echo
+
+  echo -----------------------------------------
+  echo Making mount point for 2nd root partition
+  echo -----------------------------------------
+  mkdir -p _CHROOT2 || exit $?
+  echo
+
+  echo ------------------------
+  echo Mount 2nd root partition
+  echo ------------------------
+  mount_disk_at 0 2 _CHROOT2 || exit $?
+  echo
+
+  echo ------------------------
+  echo Copying auto_tpm_encrypt
+  echo ------------------------
+  cp /tmp/auto_tpm_encrypt.py _CHROOT/root/auto_tpm_encrypt.py || exit $?
+  echo
+
+  echo ---------------------
+  echo Duplicating arch root
+  echo ---------------------
+  cp -r _CHROOT/* _CHROOT2/ || exit $?
+  echo
+'''
+
+_BUILD_SCRIPT_3 = '''
+  echo ----------------------
+  echo Mounting EFI partition
+  echo ----------------------
+  mount_disk_at 0 0 /efi || exit $?
+  echo
+
+  echo ----------------------------------
+  echo Renaming grub efi bin from default
+  echo ----------------------------------
+  mv /efi/EFI/Boot/bootx64.efi /efi/EFI/Boot/grub.efi || exit $?
+  echo
+
+  echo --------------------------------------------
+  echo Renaming auto_tpm_encrypt efi bin to default
+  echo --------------------------------------------
+  mv /efi/EFI/Boot/Auto_TPM_Encrypted_Boot.efi /efi/EFI/Boot/bootx64.efi \\
+    || exit $?
+  echo
+'''
+
+_BUILD_SCRIPT_4 = '''
+  echo ------------------
+  echo Loading TPM module
+  echo ------------------
+  modprobe tpm || exit $?
+  echo
+'''
+
+def _get_tpm_dir():
+  import os
+  xdg_cache_dir = os.environ.get('XDG_CACHE_DIR')
+  if not xdg_cache_dir:
+    xdg_cache_dir = os.path.expanduser('~/.cache')
+  d = os.path.join(xdg_cache_dir, 'pivotzonedev_tpm')
+  return d
+
+def TPM(vm):
+  import os, subprocess, shutil, errno
+  statedir = _get_tpm_dir()
+  os.makedirs(statedir, exist_ok = True)
+  sock = os.path.join(statedir, 'sock')
+  swtpm = shutil.which('swtpm')
+  if not swtpm:
+    raise FileNotFoundError(errno.ENOENT,
+                            'Please install swtpm to use this vmdef')
+  proc = subprocess.Popen((swtpm, 'socket', '--tpmstate', f'dir={statedir}',
+                           '--ctrl', f'type=unixio,path={sock}', '--tpm2'))
+  return {'type': 'socket', 'path': sock}
+
+def BUILD(vm):
+  import os
+  my_zone = os.path.join(os.path.dirname(__file__), 'mypivotzone.py')
+  with open(my_zone, 'r') as f:
+    code = f.read()
+  idx = code.index('packages_to_include_when_entering_zone ')
+  idx = code.index('\n', idx)
+  code = code[idx:]
+  idx = code.index(']')
+  pkgs = code[:idx].replace(',','').replace("'",'').replace('\n', '').split()
+
+  try:
+    with open('../Linux/auto_tpm_encrypt.py', 'rb') as f:
+      auto_tpm_encrypt = f.read()
+  except FileNotFoundError:
+    auto_tpm_encrypt = None
+    raise NotImplementedError('TODO download this')
+
+  vm.super().BUILD(vm)
+
+  if auto_tpm_encrypt:
+    vm.vprint(1, 'Copying auto_tpm_encrypt from local source to VM')
+    vm.put_file_data('/tmp/auto_tpm_encrypt.py', auto_tpm_encrypt)
+
+  script = vm.prepend_system_shell_helpers(_BUILD_SCRIPT_1)
+  script = script.replace('PKGS', ' '.join(pkgs))
+  script = script.replace('_CHROOT', get_chroot())
+  vm.pipe_shell(script, echo_output = True, check = True)
+
+  vm.vprint(1, 'Shrinking root partition')
+  vm.sendkeys(vm.prepend_system_shell_helpers(
+                'parted "$(get_disk_at 0)" resizepart 2 5G\n'))
+  vm.wait_for('continue?')
+  vm.sendkeys('Yes\n')
+  vm.wait_for('/etc/fstab')
+
+  script = vm.prepend_system_shell_helpers(_BUILD_SCRIPT_2)
+  script = script.replace('_CHROOT', get_chroot())
+  vm.pipe_shell(script, echo_output = True, check = True)
+
+  vm.sendkeys('poweroff\n')
+  vm.wait_until_stopped()
+
+  vm.vprint(1, 'Booting into 1st root')
+  vm.manual_boot(vmdef_name = NAME, uefi = True)
+  BOOT(vm)
+  vm.vprint(1, 'Getting ESP device')
+  script = vm.prepend_system_shell_helpers('get_disk_at 0 0 || exit $?')
+  esp, ret = vm.pipe_shell(script, check = True)
+  vm.vprint(1, 'Getting 2nd root device')
+  script = vm.prepend_system_shell_helpers('get_disk_at 0 2 || exit $?')
+  root2, ret = vm.pipe_shell(script, check = True)
+  vm.vprint(1, 'Running auto_tpm_encrypt')
+  vm.sendkeys('IGNORE_MISSING_AC_STATE=1 python /root/auto_tpm_encrypt.py\n')
+  vm.wait_for('Encrypt/Decrypt an unbooted partition')
+  vm.wait_for('> ')
+  vm.sendkeys('1\n')
+  vm.wait_for('> ')
+  vm.sendkeys(root2 + b'\n')
+  for _ in range(2):
+    vm.wait_for('> ')
+    vm.sendkeys('\n')
+  vm.wait_for('> ')
+  vm.sendkeys(esp + b'\n')
+  vm.vprint(1, 'Settings entered')
+  vm.wait_for('Encrypting')
+  vm.vprint(1, 'Encryption in progress')
+  vm.wait_for('Done!')
+  vm.wait_for(']# ')
+
+  script = vm.prepend_system_shell_helpers(_BUILD_SCRIPT_3)
+  vm.pipe_shell(script, echo_output = True, check = True)
+
+  vm.sendkeys('poweroff\n')
+  vm.wait_until_stopped()
+
+  vm.vprint(1, 'Booting into 2nd root')
+  vm.manual_boot(vmdef_name = NAME, uefi = True)
+  vm.wait_for('Please enter passphrase for disk primary')
+  vm.sendkeys('\n')
+  BOOT(vm)
+
+  vm.pipe_shell(_BUILD_SCRIPT_4, echo_output = True, check = True)
+
+  vm.vprint(1, 'Sealing key')
+  vm.sendkeys('IGNORE_MISSING_AC_STATE=1 python /root/auto_tpm_encrypt.py\n')
+  vm.wait_for('Setup TPM auto-decrypt for the booted OS')
+  vm.wait_for('> ')
+  vm.sendkeys('2\n')
+  vm.wait_for('Done!')
+  vm.wait_for(']# ')
+
+def BOOT(vm):
+  # vm.realtime_shell()
+  vm.wait_for('pivotzonedev login:')
+  vm.sendkeys('root\n')
+  vm.wait_for('Password: ')
+  vm.sendkeys('pivotzonedev\n')
+  vm.wait_for(']# ')
+
+def STOP(vm):
+  import virtuator
+  try:
+    vm.sendkeys('poweroff\n')
+  except (BrokenPipeError, virtuator.VmNotFoundError):
+    pass
+  vm.wait_until_stopped(timeout = 8)
+
+def RM(vm):
+  import shutil
+  try:
+    shutil.rmtree(_get_tpm_dir())
+  except FileNotFoundError:
+    pass
+
+TEST_SCRIPT = '''
+#!/bin/sh
+export PYTHONDONTWRITEBYTECODE=x
+cd /root
+python mypivotzone.py build
+python mypivotzone.py boot
+'''.lstrip()
+
+FILES_TO_COPY = ('pacman_helper.py', 'mypivotzone.py', 'pivotzoneutils.py')
+
+def TEST(vm):
+  import os
+  d = os.path.abspath(os.path.dirname(__file__))
+  vm.vprint(1, 'Stopping if started...')
+  vm.stop()
+  vm.vprint(1, 'Booting')
+  vm.ensure_booted(vmdef_name = NAME)
+  for i in os.listdir(d):
+    if i in FILES_TO_COPY:
+      p = os.path.join(d, i)
+      vm.vprint(1, f'Copying {p} to VM')
+      vm.put_file(p, '/root/'+i, replace = True)
+  vm.vprint(1, 'Copying test script to VM')
+  vm.put_file_data('/root/test_script.sh', TEST_SCRIPT, replace = True)
+  for cmd in ('chmod +x /root/test_script.sh',
+              'alias t="/root/test_script.sh"'):
+    _, ret = vm.run_command(cmd)
+    if ret != 0:
+      raise RuntimeError('Command failed: ' + cmd)
+  # vm.vprint(1, 'Use the command \'t\' to start the test script')
+  vm.sendkeys('\nt\n')
+  vm.realtime_shell()
+  vm.basic_shell()
+
+# def DBG(vm):
+  # breakpoint()
+  # vm.ensure_booted(vmdef_name = NAME)
+  # vm.put_file_data('/usr/bin/systemctl', DUMMY_SYSTEMCTL)
+
+__import__('virtuator').handle()

@@ -1,0 +1,13 @@
+[Unit]
+Description=Alt OS Util
+After=multi-user.target
+Wants=multi-user.target
+Before=display-manager.service
+
+[Service]
+Type=oneshot
+ExecStart=alt_os_util service
+Restart=no
+
+[Install]
+WantedBy=display-manager.service

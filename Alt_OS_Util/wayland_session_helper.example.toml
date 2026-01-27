@@ -1,0 +1,20 @@
+keep_state_after_restore = false
+
+[programs.Firefox]
+cmdline_pattern = '/app/lib/firefox/firefox --name org.mozilla.firefox'
+relaunch_command = '/usr/bin/flatpak run --branch=stable --arch=x86_64 --command=firefox --file-forwarding org.mozilla.firefox'
+
+[programs.Kate]
+cmdline_pattern = '/usr/bin/kate(\s.+?)?'
+relaunch_command = '/usr/bin/kate -b'
+
+[programs.Konsole]
+cmdline_pattern = '/usr/bin/konsole'
+relaunch_command = '/usr/bin/konsole'
+
+[programs.Dolphin]
+cmdline_pattern = '/usr/bin/dolphin'
+relaunch_command = '/usr/bin/dolphin'
+
+
+
