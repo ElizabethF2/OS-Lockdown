@@ -33,30 +33,33 @@ ADDDED_COMMENT = ' # ADDED_BY_AUTO_TPM_ENCRYPT'
 
 # These settings aren't designed to be changed and changing them may break stuff.
 # Don't change any of these without reading the warnings in the guide first.
-USE_SYSTEMD_INIT = bool(os.environ.get('AUTOTPM_USE_SYSTEMD_INIT', True))
-BLANK_PASSWORD = os.environb.get(b'AUTOTPM_BLANK_PASSWORD', b'')
-FILESYTEM_WAIT_ITERATION_TIME = float(os.environ.get('AUTOTPM_FILESYTEM_WAIT_ITERATION_TIME', 5))
-FILESYTEM_WAIT_TOTAL_TIME = float(os.environ.get('AUTOTPM_FILESYTEM_WAIT_TOTAL_TIME', 180))
-KEY_LENGTH_IN_BYTES = int(os.environ.get('AUTOTPM_KEY_LENGTH_IN_BYTES', 32))
-DO_MASK_STEAMCL_SERVICE = bool(os.environ.get('AUTOTPM_DO_MASK_STEAMCL_SERVICE', True))
-RD_LUKS_TIMEOUT = [i if i is None else int(i) for i in [os.environ.get('AUTOTPM_RD_LUKS_TIMEOUT')]][0]
-RD_LUKS_TRY_EMPTY_PASSWORD = bool(os.environ.get('AUTOTPM_RD_LUKS_TRY_EMPTY_PASSWORD', False))
-RD_LUKS_NO_READ_WORKQUEUE = bool(os.environ.get('AUTOTPM_RD_LUKS_NO_READ_WORKQUEUE', True))
-DISABLE_GPT_AUTO = bool(os.environ.get('AUTOTPM_DISABLE_GPT_AUTO', True))
-SHOW_KERNEL_MESSAGES_AT_BOOT = bool(os.environ.get('AUTOTPM_SHOW_KERNEL_MESSAGES_AT_BOOT', True))
-ENABLE_IOMMU = bool(os.environ.get('AUTOTPM_ENABLE_IOMMU', True))
-USE_ESP_MANIFEST = bool(os.environ.get('AUTOTPM_USE_ESP_MANIFEST', True))
-ESP_MANIFEST_PATH = os.environ.get('AUTOTPM_ESP_MANIFEST_PATH', 'auto_tpm_encrypt_esp_manifest.json')
-USE_STEAMOS_SECOND_STAGE_ESP_MANIFEST = bool(os.environ.get('AUTOTPM_USE_STEAMOS_SECOND_STAGE_ESP_MANIFEST', True))
-STEAMOS_SECOND_STAGE_ESP_MANIFEST_PATH_PREFIX = os.environ.get('AUTOTPM_STEAMOS_SECOND_STAGE_ESP_MANIFEST_PATH_PREFIX',
-                                                               'auto_tpm_encrypt_steamos_second_stage_esp_manifest.')
-STEAMOS_SECOND_STAGE_ESP_MANIFEST_PATH_EXTENSION = os.environ.get('AUTOTPM_STEAMOS_SECOND_STAGE_ESP_MANIFEST_PATH_EXTENSION', '.json')
-SKIP_CONTROLLER_FIRMWARE_AUDIT = bool(os.environ.get('AUTOTPM_SKIP_CONTROLLER_FIRMWARE_AUDIT', False))
-USE_SECURE_BOOT_SIGNING = bool(os.environ.get('AUTOTPM_USE_SECURE_BOOT_SIGNING', True))
-EFI_STUB_PATH = os.environ.get('AUTOTPM_EFI_STUB_PATH', '/usr/lib/systemd/boot/efi/linuxx64.efi.stub')
-REBOOT_TIMER_DURATION = int(os.environ.get('AUTOTPM_REBOOT_TIMER_DURATION', 20))
-PCR_LIST = os.environ.get('AUTOTPM_PCR_LIST', '0,2,4')
-SHOULD_KILL_WINDOWS_BOOT_MANAGER = bool(os.environ.get('AUTOTPM_KILL_WINDOWS_BOOT_MANAGER', True))
+DEFAULTS = {
+  'use_systemd_init': True,
+  'blank_password': '',
+  'filesystem_wait_iteration_time': 5,
+  'filesystem_wait_total_time': 180,
+  'key_length_in_bytes': 32,
+  'key_path': '/secret.bin',
+  'do_mask_steamcl_service': True,
+  'rd_luks_timeout': None,
+  'rd_luks_try_empty_password': False,
+  'rd_luks_no_read_workqueue': True,
+  'disable_gpt_auto': True,
+  'show_kernel_message_at_boot': True,
+  'enable_iommu': True,
+  'use_esp_manifest': True,
+  'esp_manifest_path': 'auto_tpm_encrypt_esp_manifest.json',
+  'use_steamos_second_stage_esp_manifest': True,
+  'steamos_second_stage_esp_manifest_path_prefix': 'auto_tpm_encrypt_steamos_second_stage_esp_manifest.',
+  'steamos_second_stage_esp_manifest_path_extension': '.json',
+  'skip_controller_firmware_audit': False,
+  'use_secure_boot_signing': True,
+  'efi_stub_path': '/usr/lib/systemd/boot/efi/linuxx64.efi.stub',
+  'reboot_timer_duration': 20,
+  'pcr_list': '0,2,4',
+  'should_kill_windows_boot_manager': True,
+  'kernel_parameters': '',
+}
 
 STEAMCL_SERVICE_MASK_PATH = '/etc/systemd/system/steamos-install-steamcl.service'
 
@@ -535,8 +538,11 @@ def should_use_secure_boot_signing():
   return (
     USE_SECURE_BOOT_SIGNING and
     not device_is_steamdeck() and
-    get_named_arg('--key') is not None and
-    get_named_arg('--cert') is not None)
+    get_config_file()
+      .get('secure_boot_key', get_named_arg('--key')) is not None and
+    get_config_file()
+      .get('secure_boot_cert', get_named_arg('--cert')) is not None
+  )
 
 def maybe_kill_windows_boot_manager():
   if not SHOULD_KILL_WINDOWS_BOOT_MANAGER:
@@ -706,6 +712,20 @@ def ensure_file_has_desired_contents(path, desired_contents, mode = None):
   if mode is not None:
     os.chmod(path, mode)
 
+def generate_key():
+  key = b''
+  while len(key) < KEY_LENGTH_IN_BYTES:
+    key += getrandom(1, getattr(os, 'GRND_RANDOM', 0)) \
+           if (getrandom := getattr(os, 'getrandom', None)) else \
+           os.urandom(1)
+  return key
+
+def write_key(path, data):
+  f = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
+  f = os.open(path, f, mode = 0o600)
+  with open(f, 'xb') as f:
+    f.write(data)
+
 def encrypt(root_partition, home_partition, var_partition, esp_partition):
   tmp_mountpoint = tempfile.mkdtemp(prefix='tmp_mountpoint_')
 
@@ -717,22 +737,14 @@ def encrypt(root_partition, home_partition, var_partition, esp_partition):
   print('Generating encryption key')
   getrandom = getattr(os, 'getrandom', None)
   grnd_random = getattr(os, 'GRND_RANDOM', 0)
-  encryption_key = b''
-  while len(encryption_key) < KEY_LENGTH_IN_BYTES:
-    if getrandom and grnd_random:
-      encryption_key += getrandom(1, flags = grnd_random)
-    else:
-      encryption_key = os.urandom(1)
+  encryption_key = generate_key()
 
   print('Storing backup of key')
   while True:
     key_backup_path = os.path.join(get_or_create_data_dir(),
                                    'secret-backup.' + os.urandom(4).hex() + '.bin')
     try:
-      f = os.O_WRONLY | os.O_CREAT | os.O_EXCL | getattr(os, 'O_BINARY', 0)
-      f = os.open(key_backup_path, f, mode = 0o600)
-      with open(f, 'xb') as f:
-        f.write(encryption_key)
+      write_key(key_backup_path, encryption_key)
       print('Backup stored at ' + key_backup_path)
       break
     except FileExistsError:
@@ -861,7 +873,7 @@ def encrypt(root_partition, home_partition, var_partition, esp_partition):
         print('Copying encryption key to partition')
         while True:
           try:
-            partition_key_path = os.path.join(mount_point, 'secret.bin')
+            partition_key_path = os.path.join(mount_point, KEY_PATH[1:])
             with open(partition_key_path, 'xb') as f:
               f.write(encryption_key)
             os.chmod(partition_key_path, stat.S_IRWXU | stat.S_IRWXG)
@@ -992,8 +1004,8 @@ def decrypt(root_partition, home_partition, var_partition, esp_partition, key_fi
         subprocess.run(['cryptsetup', 'reencrypt', '--key-file', key_file, '--decrypt', partition], check = True)
 
       print('Waiting for file system to become available and checking file system type')
-      for _ in range(math.ceil(FILESYTEM_WAIT_TOTAL_TIME/FILESYTEM_WAIT_ITERATION_TIME)):
-        time.sleep(FILESYTEM_WAIT_ITERATION_TIME)
+      for _ in range(math.ceil(FILESYSTEM_WAIT_TOTAL_TIME/FILESYSTEM_WAIT_ITERATION_TIME)):
+        time.sleep(FILESYSTEM_WAIT_ITERATION_TIME)
         clear_partition_cache()
         fstype = get_partitions()[partition]['fstype']
         if fstype:
@@ -1241,8 +1253,8 @@ def setup_auto_tpm_decrypt():
     home_partition = get_named_arg('--home')
     var_partition = get_named_arg('--var')
     efi_bin_suffix = get_named_arg('--suffix')
-    secure_boot_key = get_named_arg('--key')
-    secure_boot_cert = get_named_arg('--cert')
+    secure_boot_key_arg = get_named_arg('--key')
+    secure_boot_cert_arg = get_named_arg('--cert')
   else:
     esp_partition, home_partition, var_partition = get_non_root_partitions_from_hook()
 
@@ -1285,7 +1297,7 @@ def setup_auto_tpm_decrypt():
       die('Unable to locate kernel binary')
 
     print('Generating kernel command line args')
-    kernel_args = ''
+    kernel_args = KERNEL_PARAMETERS
     try:
       with open('/etc/default/grub', 'r') as f:
         grub_defaults = f.read()
@@ -1395,7 +1407,7 @@ def setup_auto_tpm_decrypt():
                     '--quiet',
                     '--policy', os.path.join(workspace_dir, 'policy.digest'),
                     '--parent-context', os.path.join(workspace_dir, 'primary.context'),
-                    '--sealing-input', '/secret.bin',
+                    '--sealing-input', KEY_PATH,
                     '--public', os.path.join(workspace_dir, 'object.public'),
                     '--private', os.path.join(workspace_dir, 'object.private')], check=True)
   subprocess.run(['tpm2_load',
@@ -1422,7 +1434,7 @@ def setup_auto_tpm_decrypt():
       subprocess.Popen(['nohup', 'xmessage', msg], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
     for partition in (root_path, home_partition, var_partition):
       if partition:
-        subprocess.run(['cryptsetup', 'luksAddKey', partition, '--key-file', '/secret.bin'], input = BLANK_PASSWORD + b'\n', check = True)
+        subprocess.run(['cryptsetup', 'luksAddKey', partition, '--key-file', KEY_PATH], input = BLANK_PASSWORD + b'\n', check = True)
   else:
     for partition in (root_path, home_partition, var_partition):
       if partition:
@@ -1484,10 +1496,10 @@ def setup_auto_tpm_decrypt():
       script_cmd += ['--var', var_partition]
     if efi_bin_suffix:
       script_cmd += ['--suffix', efi_bin_suffix]
-    if secure_boot_key:
-      script_cmd += ['--key', secure_boot_key]
-    if secure_boot_cert:
-      script_cmd += ['--cert', secure_boot_cert]
+    if secure_boot_key_arg:
+      script_cmd += ['--key', secure_boot_key_arg]
+    if secure_boot_cert_arg:
+      script_cmd += ['--cert', secure_boot_cert_arg]
     ensure_file_has_desired_contents(
       PACMAN_HOOK_PATH,
       PACMAN_HOOK_TEMPLATE
@@ -1605,9 +1617,11 @@ def setup_auto_tpm_decrypt():
 
     if should_use_secure_boot_signing():
       print('Signing EFI bin')
+      key = get_config_file().get('secure_boot_key', secure_boot_key_arg)
+      cert = get_config_file().get('secure_boot_cert', secure_boot_cert_arg)
       subprocess.run(['sbsign',
-                       '--key', secure_boot_key,
-                       '--cert', secure_boot_cert,
+                       '--key', key,
+                       '--cert', cert,
                        tmp_efi_bin,
                        '--output', tmp_signed_efi_bin])
       tmp_efi_bin = tmp_signed_efi_bin
@@ -1623,9 +1637,9 @@ def setup_auto_tpm_decrypt():
 
           working_copy = list(filter(lambda line: not line.endswith(ADDDED_COMMENT), original_lines))
           if home_partition:
-            working_copy.append('tpm_encrypted_home ' + home_partition + ' /secret.bin luks,initramfs,keyscript=decrypt_keyctl' + ADDDED_COMMENT)
+            working_copy.append('tpm_encrypted_home ' + home_partition + ' ' + KEY_PATH + ' luks,initramfs,keyscript=decrypt_keyctl' + ADDDED_COMMENT)
           if var_partition:
-            working_copy.append('tpm_encrypted_var ' + var_partition + ' /secret.bin luks,initramfs,keyscript=decrypt_keyctl' + ADDDED_COMMENT)
+            working_copy.append('tpm_encrypted_var ' + var_partition + ' ' + KEY_PATH + ' luks,initramfs,keyscript=decrypt_keyctl' + ADDDED_COMMENT)
 
           if working_copy != original_lines:
             f.seek(0)
@@ -2057,11 +2071,43 @@ def menu():
   else:
     die('Invalid input')
 
+@functools.cache
+def get_config_file():
+  if (home := os.environ.get('XDG_CONFIG_HOME')) is None:
+    home = os.path.join(os.path.expanduser('~'), '.config')
+  try:
+    with open(os.path.join(home, 'auto_tpm_encrypt.toml'), 'rb') as f:
+      return __import__('tomllib').load(f)
+  except FileNotFoundError:
+    return {}
+
+def load_config():
+  cfg = dict(DEFAULTS)
+  for k,v in get_config_file().items():
+    if k in cfg:
+      cfg[k] = v
+  for k in cfg.keys():
+    if (v := os.environ.get('AUTOTPM_' + k.upper())) is None:
+      continue
+    if type(DEFAULTS[k]) is int:
+      v = int(v)
+    elif type(DEFAULTS[k]) is bool:
+      v = bool(v)
+    cfg[k] = v
+  cfg['blank_password'] = cfg['blank_password'].encode()
+  for k,v in cfg.items():
+    globals()[k.upper()] = v
+
 def main():
+  load_config()
+
+  if '--write_key' in sys.argv:
+    return write_key(KEY_PATH, generate_key())
   if '--setup_auto_tpm_decrypt' in sys.argv:
     return setup_auto_tpm_decrypt()
 
   print_sys_info_and_do_sanity_checks()
+
   if '--ensure_booted_os_is_sealed' in sys.argv:
     sys.exit(0 if ensure_booted_os_is_sealed() else 1)
   elif '--ensure_no_os_are_unsealed' in sys.argv:
