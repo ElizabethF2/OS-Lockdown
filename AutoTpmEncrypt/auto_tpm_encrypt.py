@@ -45,7 +45,7 @@ DEFAULTS = {
   'rd_luks_try_empty_password': False,
   'rd_luks_no_read_workqueue': True,
   'disable_gpt_auto': True,
-  'show_kernel_message_at_boot': True,
+  'show_kernel_messages_at_boot': True,
   'enable_iommu': True,
   'use_esp_manifest': True,
   'esp_manifest_path': 'auto_tpm_encrypt_esp_manifest.json',
