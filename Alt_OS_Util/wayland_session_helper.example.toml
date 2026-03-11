@@ -15,6 +15,3 @@ relaunch_command = '/usr/bin/konsole'
 [programs.Dolphin]
 cmdline_pattern = '/usr/bin/dolphin'
 relaunch_command = '/usr/bin/dolphin'
-
-
-

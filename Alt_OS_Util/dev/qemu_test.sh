@@ -27,14 +27,11 @@ qemu-system-x86_64 \
 #  -boot d \
 
 
-
 # -audio driver=sdl,model=hda \
 
 # lspci -nn
 # qemu-img create -f qcow2 /root/win_test/ssd.img 100G
 # cp /usr/share/edk2/x64/OVMF_VARS.fd /root/win_test/uefi_vars.fd
-
-
 
 # -blockdev node-name=ssd1,driver=raw,file.driver=host_device,file.filename=/dev/loop0 \
 

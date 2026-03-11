@@ -1,7 +1,5 @@
 #!/usr/bin/env python3
 
-
-
 import sys, os, subprocess, platform, re, shutil, json, functools, tempfile
 import stat, math, time, shlex, hashlib
 
@@ -24,9 +22,6 @@ SUPPORTED_UNENCRYPTED_FILESYSTEMS = ('ext2', 'ext3', 'ext4', 'btrfs')
 SUPPORTED_ENCRYPTED_FILESYSTEMS = ('crypto_LUKS',)
 SUPPORTED_FILESYSTEMS = (SUPPORTED_UNENCRYPTED_FILESYSTEMS +
                          SUPPORTED_ENCRYPTED_FILESYSTEMS)
-
-WAKELOCK_SERVICES = ('sleep.target', 'suspend.target',
-                     'hibernate.target', 'hybrid-sleep.target')
 
 REMOVED_COMMENT = '# REMOVED_BY_AUTO_TPM_ENCRYPT '
 ADDDED_COMMENT = ' # ADDED_BY_AUTO_TPM_ENCRYPT'
@@ -383,28 +378,19 @@ def die_if_not_on_ac_power():
     msg = 'Not plugged in. Connect your device to its charger.'
     print(msg) if os.environ.get('IGNORE_IF_ON_BATTERY') else die(msg)
 
-def toggle_wakelock(enabled, original_states = None):
-  out = subprocess.run(['systemctl', 'list-unit-files'], capture_output = True, check = True)
-  states = {sp[0]: sp[1] for sp in filter(lambda i: len(i) == 3, (i.split() for i in out.stdout.decode().splitlines()))}
-  if enabled:
-    services_to_mask = []
-    for service in WAKELOCK_SERVICES:
-      if service not in states:
-        die(service + ': Service missing when enabling wakelock')
-      if states[service] != 'masked':
-        services_to_mask.append(service)
-    if len(services_to_mask) > 0:
-      subprocess.run(['systemctl', 'mask'] + services_to_mask, check = True)
-  else:
-    services_to_unmask = []
-    for service in WAKELOCK_SERVICES:
-      if service not in states:
-        die(service + ': Service missing when disabling wakelock')
-      if original_states[service] != 'masked' and states[service] == 'masked':
-        services_to_unmask.append(service)
-    if len(services_to_unmask) > 0:
-      subprocess.run(['systemctl', 'unmask'] + services_to_unmask, check = True)
-  return states
+def aquire_wakelock():
+  name = 'auto_tpm_encrypt_wakelock_' + generate_key().hex()
+  subprocess.check_call((
+    'systemd-run',
+    '--unit='+name,
+    'systemd-inhibit',
+    '--who=auto_tpm_encrypt',
+    'sh', '-c', 'while true; do sleep 9999; done',
+  ))
+  return name
+
+def release_wakelock(name):
+  subprocess.check_call(('systemctl', 'stop', name))
 
 def ensure_pacman_ready_on_steamos():
   # assume pacman is already setup if readonly has been disabled
@@ -816,7 +802,7 @@ def encrypt(root_partition, home_partition, var_partition, esp_partition):
 
       print('Enabling wakelock')
       die_if_not_on_ac_power()
-      original_states = toggle_wakelock(True)
+      wakelock = aquire_wakelock()
 
       maybe_kill_windows_boot_manager()
 
@@ -867,8 +853,7 @@ def encrypt(root_partition, home_partition, var_partition, esp_partition):
         subprocess.run(['mount', '/dev/mapper/current_tpm_encrypted_vol', mount_point], check = True)
 
         if fstype == 'btrfs':
-          subprocess.run(['btrfs', 'property', 'set', tmp_mountpoint, 'ro', 'false'], check = True)
-          # TODO: retry in loop with timeout
+          subprocess.run(['btrfs', 'property', 'set', mount_point, 'ro', 'false'], check = True)
 
         print('Copying encryption key to partition')
         while True:
@@ -910,7 +895,7 @@ def encrypt(root_partition, home_partition, var_partition, esp_partition):
         subprocess.run(['arch-chroot', mount_point, exe, BIN_PATH] + args, check = True)
 
         print('Disabling wakelock')
-        toggle_wakelock(False, original_states = original_states)
+        release_wakelock(wakelock)
 
         print('Unmounting the encrypted partition')
         subprocess.run(['umount', mount_point], check = True)
@@ -966,7 +951,7 @@ def decrypt(root_partition, home_partition, var_partition, esp_partition, key_fi
 
   print('Enabling wakelock')
   die_if_not_on_ac_power()
-  original_states = toggle_wakelock(True)
+  wakelock = aquire_wakelock()
 
   for partition in (root_partition, home_partition, var_partition):
     if partition:
@@ -1082,7 +1067,7 @@ def decrypt(root_partition, home_partition, var_partition, esp_partition, key_fi
         subprocess.run(['umount', tmp_root], check = True)
 
   print('Disabling wakelock')
-  toggle_wakelock(False, original_states = original_states)
+  release_wakelock(wakelock)
 
   esp_warning = ('WARNING! The contents of your ESP do not match what was recorded\n' +
                  '         in the manifest. It is possible your ESP has been\n' +
