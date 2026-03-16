@@ -146,7 +146,7 @@ REBOOT_TIMER_SCRIPT_TEMPLATE = """
 if [ "$?" != "0" ]; then
   (sleep $reboot_timer_duration ; kill -INT 1)&
   reboot_timer_pid=$!
-  read -p "[Press enter to prevent a reboot]" 2> /dev/console < /dev/console
+  read -p "[Press enter to prevent a reboot] " 2> /dev/console < /dev/console
   kill -HUP $reboot_timer_pid > /dev/null
 fi
 """.strip()
