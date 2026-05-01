@@ -416,15 +416,15 @@ def ensure_command_exists(command, package):
 
 def ensure_packages_that_are_used_in_chroot_are_installed():
   ensure_command_exists('objcopy', 'binutils')
-  ensure_command_exists('mkinitcpio', 'mkinitcpio')
   ensure_command_exists('tpm2_unseal', 'tpm2-tools')
   ensure_command_exists('btrfs', 'btrfs-progs')
   if should_use_secure_boot_signing():
     ensure_command_exists('sbsign', 'sbsigntools')
-
   for cmd in ('lsblk', 'blkid', 'udevadm', 'mount', 'umount'):
     if not shutil.which(cmd):
       die(cmd + ' not found')
+  if not any(map(shutil.which, ('mkinitcpio', 'dracut'))):
+    die('Unable to find initfs utility')
 
 def kernel_arg_index(args, arg):
   try:
@@ -543,6 +543,29 @@ def maybe_kill_windows_boot_manager():
     proc = subprocess.run((efibootmgr, '--label', label, '--delete-bootnum'))
     print('  Return Code: ' + str(proc.returncode))
 
+CHROOT_MOUNTS = {
+  'proc': ('proc', 'nosuid,noexec,nodev'),
+  'sys': ('sysfs', 'nosuid,noexec,nodev,ro'),
+  'sys/firmware/efi/efivars': ('efivarfs', 'nosuid,noexec,nodev'),
+  'dev': ('devtmpfs', 'mode=0755,nosuid'),
+  'dev/pts': ('devpts', 'mode=0620,gid=5,nosuid,noexec'),
+  'dev/shm': ('tmpfs', 'mode=1777,nosuid,nodev'),
+  'run': ('tmpfs', None),
+  'tmp': ('tmpfs', 'mode=1777,strictatime,nodev,nosuid'),
+}
+
+def setup_chroot(root):
+  for path in sorted(CHROOT_MOUNTS.keys()):
+    t, o = CHROOT_MOUNTS[path]
+    cmd = ['mount', path, os.path.join(root, path), '-t', t]
+    if o:
+      cmd += ['-o', o]
+    subprocess.check_call(cmd)
+
+def teardown_chroot(root):
+  for path in sorted(CHROOT_MOUNTS.keys(), reverse = True):
+    subprocess.check_call(('umount', os.path.join(root, path)))
+
 def print_sys_info_and_do_sanity_checks():
   model = get_device_model()
   root_partition = get_partition_for_mountpoint('/')
@@ -583,7 +606,7 @@ def print_sys_info_and_do_sanity_checks():
 
   die_if_not_on_ac_power()
 
-  for cmd in ('lsblk', 'mount', 'umount', 'resize2fs', 'e2fsck', 'dumpe2fs', 'modprobe', 'systemctl'):
+  for cmd in ('lsblk', 'mount', 'umount', 'resize2fs', 'e2fsck', 'dumpe2fs', 'modprobe', 'systemctl', 'chroot'):
     if not shutil.which(cmd):
       die(cmd + ' not found')
 
@@ -591,7 +614,6 @@ def print_sys_info_and_do_sanity_checks():
     ensure_command_exists('efibootmgr', 'efibootmgr')
 
   ensure_command_exists('cryptsetup', 'cryptsetup')
-  ensure_command_exists('arch-chroot', 'arch-install-scripts')
   ensure_command_exists('partprobe', 'parted')
   ensure_command_exists('btrfs', 'btrfs-progs')
 
@@ -605,7 +627,7 @@ def print_sys_info_and_do_sanity_checks():
   if device_is_steamdeck() and len(mmc_esp_partitions) != 1:
     die('Expected 1 mmc esp partition, found ' + str(len(mmc_esp_partitions)))
 
-  if subprocess.run(['modprobe', 'tpm']).returncode != SUCCESS:
+  if not os.path.isdir('/sys/module/tpm') and subprocess.run(['modprobe', 'tpm']).returncode != SUCCESS:
     if os.path.exists('/efi/EFI/steamos/grub.cfg'):
       with open('/efi/EFI/steamos/grub.cfg', 'r+') as f:
         cfg = f.read()
@@ -619,7 +641,7 @@ def print_sys_info_and_do_sanity_checks():
           print('Please reboot and re-run this script')
     die('Error loading TPM kernel module')
 
-  if subprocess.run(['modprobe', 'dm_crypt']).returncode != SUCCESS:
+  if not os.path.isdir('/sys/module/dm_crypt') and subprocess.run(['modprobe', 'dm_crypt']).returncode != SUCCESS:
     die('Error loading dm_crypt kernel module')
 
   if os.path.exists('/dev/mapper/current_tpm_encrypted_vol'):
@@ -892,7 +914,11 @@ def encrypt(root_partition, home_partition, var_partition, esp_partition):
             args += ['--'+i, val]
 
         exe = os.path.basename(sys.executable)
-        subprocess.run(['arch-chroot', mount_point, exe, BIN_PATH] + args, check = True)
+        try:
+          setup_chroot(mount_point)
+          subprocess.run(['chroot', mount_point, exe, BIN_PATH] + args, check = True)
+        finally:
+          teardown_chroot(mount_point)
 
         print('Disabling wakelock')
         release_wakelock(wakelock)
@@ -1119,6 +1145,101 @@ def decrypt(root_partition, home_partition, var_partition, esp_partition, key_fi
     die(die_reason)
 
   print('Done')
+
+def make_initfs_via_mkinitcpio(workspace_dir):
+  print('Updating mkinitcpio hooks')
+  mkinitcpio_buf = []
+  mkinitcpio_cfg_path = '/etc/mkinitcpio.conf'
+  if not os.path.exists(mkinitcpio_cfg_path):
+    mkinitcpio_cfg_path = '/etc/ostree-mkinitcpio.conf'
+  if not os.path.exists(mkinitcpio_cfg_path):
+    die('Unable to find mkinitcpio config')
+  with open(mkinitcpio_cfg_path, 'r') as f:
+    for line in map(str.strip, f):
+      match = re.match(r'^HOOKS\s*=\s*(".+"|\(.+\))$', line)
+      if match:
+        device_manager = 'systemd' if USE_SYSTEMD_INIT else 'udev'
+        encryption_hook = 'sd-encrypt' if USE_SYSTEMD_INIT else 'encrypt'
+        hooks_to_remove = ('udev', 'encrypt') if USE_SYSTEMD_INIT else ('systemd', 'sd-encrypt')
+        # root_fstype = get_partition_stats_via_blkid()[get_partition_for_mountpoint('/')]['TYPE']
+
+        hooks = match.group(1)[1:-1].split()
+        for hook in hooks_to_remove:
+          if hook in hooks:
+            hooks.remove(hook)
+        if 'base' not in hooks:
+          hooks.insert(0, 'base')
+        if device_manager not in hooks:
+          hooks.insert(hooks.index('base') + 1, device_manager)
+        if 'autodetect' not in hooks:
+          hooks.insert(hooks.index(device_manager) + 1, 'autodetect')
+        if 'modconf' not in hooks:
+          hooks.insert(hooks.index('autodetect') + 1, 'modconf')
+        if 'block' not in hooks:
+          hooks.insert(hooks.index('modconf') + 1, 'block')
+        if encryption_hook not in hooks:
+          hooks.insert(hooks.index('block') + 1, encryption_hook)
+        if 'auto_tpm_encrypt' not in hooks:
+          hooks.insert(hooks.index(encryption_hook), 'auto_tpm_encrypt')
+        mkinitcpio_buf.append('HOOKS=(' + ' '.join(hooks) + ')')
+      else:
+        mkinitcpio_buf.append(line)
+
+  tmp_mkinitcpio_cfg_path = os.path.join(workspace_dir, 'mkinitcpio.conf')
+  with open(tmp_mkinitcpio_cfg_path, 'w') as f:
+    f.write('\n'.join(mkinitcpio_buf))
+
+  print('Ensuring sbctl post hook can be skipped')
+  # HACK HACK HACK this will modify the post hook so it can be manually skipped
+  #                this section should be updated if mkinitcpio ever adds a way
+  #                to skip certain post hooks or if arch's sbctl updates to skip
+  #                signing when keys don't exist in the default path
+  sbctl_post_hook_path = '/usr/lib/initcpio/post/sbctl'
+  sbctl_skip_var_name = 'SKIPSBCTLPOSTHOOK'
+  sbctl_skip_code = 'if [ "x$SKIPSBCTLPOSTHOOK" != "x" ]; then exit 0; fi # added by auto_tpm_encrypt\n\n'
+  try:
+    with open(sbctl_post_hook_path, 'r') as f:
+      sbctl_script = f.read()
+    if sbctl_skip_var_name not in sbctl_script:
+      if 'echo' not in sbctl_script:
+        die('Unable to handle this version of the sbctl post hook. See if there is a newer version of auto_tpm_encrypt.')
+      idx = sbctl_script.rfind('echo')
+      with open(sbctl_post_hook_path+'.swap', 'w') as f:
+        f.write(sbctl_script[:idx] + sbctl_skip_code + sbctl_script[idx:])
+      os.rename(sbctl_post_hook_path+'.swap', sbctl_post_hook_path)
+  except FileNotFoundError:
+    pass
+
+  print('Generating initramfs')
+  tmp_initramfs = os.path.join(workspace_dir, 'initramfs.img')
+  env = dict(os.environ)
+  env[sbctl_skip_var_name] = '1'
+  subprocess.run(['mkinitcpio',
+                    '--config', tmp_mkinitcpio_cfg_path,
+                    '--kernel', kernel_name,
+                    '--generate', tmp_initramfs],
+                    env = env,
+                    check = True)
+  return tmp_initramfs
+
+def make_initfs_via_dracut(workspace_dir):
+  os.mkdir(tmp_dir := os.path.join(workspace_dir, 'dracut-tmp'))
+  os.mkdir(overlay_dir := os.path.join(workspace_dir, 'dracut-overlay'))
+  tmp_initramfs = os.path.join(workspace_dir, 'initramfs.img')
+  subprocess.run(['dracut',
+                    '--tmpdir', tmp_dir,
+                    '--include', overlay_dir, '/',
+                    tmp_initramfs],
+                    check = True)
+  return tmp_initramfs
+
+def make_initfs(workspace_dir):
+  if shutil.which('mkinitcpio'):
+    return make_initfs_via_mkinitcpio(workspace_dir)
+  elif shutil.which('dracut'):
+    return make_initfs_via_dracut(workspace_dir)
+  else:
+    die('Unable to make initfs')
 
 def encrypt_or_decrypt():
   die_if_not_on_ac_power()
@@ -1419,7 +1540,11 @@ def setup_auto_tpm_decrypt():
       subprocess.Popen(['nohup', 'xmessage', msg], stderr=subprocess.DEVNULL, stdout=subprocess.DEVNULL)
     for partition in (root_path, home_partition, var_partition):
       if partition:
-        subprocess.run(['cryptsetup', 'luksAddKey', partition, '--key-file', KEY_PATH], input = BLANK_PASSWORD + b'\n', check = True)
+        subprocess.run(
+          ['cryptsetup', 'luksAddKey', partition, '--key-file', KEY_PATH, '--force-password'],
+          input = BLANK_PASSWORD + b'\n',
+          check = True,
+        )
   else:
     for partition in (root_path, home_partition, var_partition):
       if partition:
@@ -1427,7 +1552,7 @@ def setup_auto_tpm_decrypt():
         remove_blank_password(partition)
 
   if was_autorun:
-    print('Updating mkinitcpio hooks')
+    print('Updating unsealing service')
     if USE_SYSTEMD_INIT:
       if not device_is_steamdeck() and REBOOT_TIMER_DURATION > 0:
         template = (UNSEAL_SCRIPT_TEMPLATE
@@ -1448,7 +1573,7 @@ def setup_auto_tpm_decrypt():
                                         .replace('$tpm_address', tpm_address)
                                         .replace('$hash_algorithm', hash_algorithm)
                                         .replace('$pcr_list', PCR_LIST))
-    try:
+    if shutil.which('mkinitcpio'):
       if USE_SYSTEMD_INIT:
         ensure_file_has_desired_contents(
           INSTALL_HOOK_PATH,
@@ -1461,18 +1586,17 @@ def setup_auto_tpm_decrypt():
           INSTALL_HOOK_PATH,
           INSTALL_HOOK_TEMPLATE,
         )
-    except FileExistsError:
-      pass
     if USE_SYSTEMD_INIT:
       ensure_file_has_desired_contents(
         UNSEAL_SERVICE_PATH,
         UNSEAL_SERVICE_TEMPLATE.replace('$UNSEAL_SCRIPT_PATH', UNSEAL_SCRIPT_PATH),
       )
     targets = '\n'.join(('Target = '+i for i in PACMAN_PACKAGE_NAMES))
-    ensure_file_has_desired_contents(
-      PACMAN_BEFORE_HOOK_PATH,
-      PACMAN_BEFORE_HOOK_TEMPLATE.replace('$TARGETS', targets),
-    )
+    if (pacman := shutil.which('pacman')):
+      ensure_file_has_desired_contents(
+        PACMAN_BEFORE_HOOK_PATH,
+        PACMAN_BEFORE_HOOK_TEMPLATE.replace('$TARGETS', targets),
+      )
     script_cmd = [BIN_PATH, '--setup_auto_tpm_decrypt']
     script_cmd += ['--esp', esp_partition]
     if home_partition:
@@ -1485,85 +1609,15 @@ def setup_auto_tpm_decrypt():
       script_cmd += ['--key', secure_boot_key_arg]
     if secure_boot_cert_arg:
       script_cmd += ['--cert', secure_boot_cert_arg]
-    ensure_file_has_desired_contents(
-      PACMAN_HOOK_PATH,
-      PACMAN_HOOK_TEMPLATE
-        .replace('$TARGETS', targets)
-        .replace('$script_cmd', shlex.join(script_cmd)),
-    )
+    if pacman:
+      ensure_file_has_desired_contents(
+        PACMAN_HOOK_PATH,
+        PACMAN_HOOK_TEMPLATE
+          .replace('$TARGETS', targets)
+          .replace('$script_cmd', shlex.join(script_cmd)),
+      )
 
-    mkinitcpio_buf = []
-    mkinitcpio_cfg_path = '/etc/mkinitcpio.conf'
-    if not os.path.exists(mkinitcpio_cfg_path):
-      mkinitcpio_cfg_path = '/etc/ostree-mkinitcpio.conf'
-    if not os.path.exists(mkinitcpio_cfg_path):
-      die('Unable to find mkinitcpio config')
-    with open(mkinitcpio_cfg_path, 'r') as f:
-      for line in map(str.strip, f):
-        match = re.match(r'^HOOKS\s*=\s*(".+"|\(.+\))$', line)
-        if match:
-          device_manager = 'systemd' if USE_SYSTEMD_INIT else 'udev'
-          encryption_hook = 'sd-encrypt' if USE_SYSTEMD_INIT else 'encrypt'
-          hooks_to_remove = ('udev', 'encrypt') if USE_SYSTEMD_INIT else ('systemd', 'sd-encrypt')
-          # root_fstype = get_partition_stats_via_blkid()[get_partition_for_mountpoint('/')]['TYPE']
-
-          hooks = match.group(1)[1:-1].split()
-          for hook in hooks_to_remove:
-            if hook in hooks:
-              hooks.remove(hook)
-          if 'base' not in hooks:
-            hooks.insert(0, 'base')
-          if device_manager not in hooks:
-            hooks.insert(hooks.index('base') + 1, device_manager)
-          if 'autodetect' not in hooks:
-            hooks.insert(hooks.index(device_manager) + 1, 'autodetect')
-          if 'modconf' not in hooks:
-            hooks.insert(hooks.index('autodetect') + 1, 'modconf')
-          if 'block' not in hooks:
-            hooks.insert(hooks.index('modconf') + 1, 'block')
-          if encryption_hook not in hooks:
-            hooks.insert(hooks.index('block') + 1, encryption_hook)
-          if 'auto_tpm_encrypt' not in hooks:
-            hooks.insert(hooks.index(encryption_hook), 'auto_tpm_encrypt')
-          mkinitcpio_buf.append('HOOKS=(' + ' '.join(hooks) + ')')
-        else:
-          mkinitcpio_buf.append(line)
-
-    tmp_mkinitcpio_cfg_path = os.path.join(workspace_dir, 'mkinitcpio.conf')
-    with open(tmp_mkinitcpio_cfg_path, 'w') as f:
-      f.write('\n'.join(mkinitcpio_buf))
-
-    print('Ensuring sbctl post hook can be skipped')
-    # HACK HACK HACK this will modify the post hook so it can be manually skipped
-    #                this section should be updated if mkinitcpio ever adds a way
-    #                to skip certain post hooks or if arch's sbctl updates to skip
-    #                signing when keys don't exist in the default path
-    sbctl_post_hook_path = '/usr/lib/initcpio/post/sbctl'
-    sbctl_skip_var_name = 'SKIPSBCTLPOSTHOOK'
-    sbctl_skip_code = 'if [ "x$SKIPSBCTLPOSTHOOK" != "x" ]; then exit 0; fi # added by auto_tpm_encrypt\n\n'
-    try:
-      with open(sbctl_post_hook_path, 'r') as f:
-        sbctl_script = f.read()
-      if sbctl_skip_var_name not in sbctl_script:
-        if 'echo' not in sbctl_script:
-          die('Unable to handle this version of the sbctl post hook. See if there is a newer version of auto_tpm_encrypt.')
-        idx = sbctl_script.rfind('echo')
-        with open(sbctl_post_hook_path+'.swap', 'w') as f:
-          f.write(sbctl_script[:idx] + sbctl_skip_code + sbctl_script[idx:])
-        os.rename(sbctl_post_hook_path+'.swap', sbctl_post_hook_path)
-    except FileNotFoundError:
-      pass
-
-    print('Generating initramfs')
-    tmp_initramfs = os.path.join(workspace_dir, 'initramfs.img')
-    env = dict(os.environ)
-    env[sbctl_skip_var_name] = '1'
-    subprocess.run(['mkinitcpio',
-                      '--config', tmp_mkinitcpio_cfg_path,
-                      '--kernel', kernel_name,
-                      '--generate', tmp_initramfs],
-                      env = env,
-                      check = True)
+    tmp_initramfs = make_initfs(workspace_dir)
 
     print('Generating EFI bin')
     osrel_path = '/usr/lib/os-release'
