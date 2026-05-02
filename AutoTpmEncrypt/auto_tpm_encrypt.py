@@ -1146,7 +1146,7 @@ def decrypt(root_partition, home_partition, var_partition, esp_partition, key_fi
 
   print('Done')
 
-def make_initfs_via_mkinitcpio(workspace_dir):
+def make_initfs_via_mkinitcpio(ctx):
   print('Updating mkinitcpio hooks')
   mkinitcpio_buf = []
   mkinitcpio_cfg_path = '/etc/mkinitcpio.conf'
@@ -1185,7 +1185,7 @@ def make_initfs_via_mkinitcpio(workspace_dir):
       else:
         mkinitcpio_buf.append(line)
 
-  tmp_mkinitcpio_cfg_path = os.path.join(workspace_dir, 'mkinitcpio.conf')
+  tmp_mkinitcpio_cfg_path = os.path.join(ctx.workspace_dir, 'mkinitcpio.conf')
   with open(tmp_mkinitcpio_cfg_path, 'w') as f:
     f.write('\n'.join(mkinitcpio_buf))
 
@@ -1211,21 +1211,21 @@ def make_initfs_via_mkinitcpio(workspace_dir):
     pass
 
   print('Generating initramfs')
-  tmp_initramfs = os.path.join(workspace_dir, 'initramfs.img')
+  tmp_initramfs = os.path.join(ctx.workspace_dir, 'initramfs.img')
   env = dict(os.environ)
   env[sbctl_skip_var_name] = '1'
   subprocess.run(['mkinitcpio',
                     '--config', tmp_mkinitcpio_cfg_path,
-                    '--kernel', kernel_name,
+                    '--kernel', ctx.kernel_name,
                     '--generate', tmp_initramfs],
                     env = env,
                     check = True)
   return tmp_initramfs
 
-def make_initfs_via_dracut(workspace_dir):
-  os.mkdir(tmp_dir := os.path.join(workspace_dir, 'dracut-tmp'))
-  os.mkdir(overlay_dir := os.path.join(workspace_dir, 'dracut-overlay'))
-  tmp_initramfs = os.path.join(workspace_dir, 'initramfs.img')
+def make_initfs_via_dracut(ctx):
+  os.mkdir(tmp_dir := os.path.join(ctx.workspace_dir, 'dracut-tmp'))
+  os.mkdir(overlay_dir := os.path.join(ctx.workspace_dir, 'dracut-overlay'))
+  tmp_initramfs = os.path.join(ctx.workspace_dir, 'initramfs.img')
   subprocess.run(['dracut',
                     '--tmpdir', tmp_dir,
                     '--include', overlay_dir, '/',
@@ -1233,11 +1233,11 @@ def make_initfs_via_dracut(workspace_dir):
                     check = True)
   return tmp_initramfs
 
-def make_initfs(workspace_dir):
+def make_initfs(ctx):
   if shutil.which('mkinitcpio'):
-    return make_initfs_via_mkinitcpio(workspace_dir)
+    return make_initfs_via_mkinitcpio(ctx)
   elif shutil.which('dracut'):
-    return make_initfs_via_dracut(workspace_dir)
+    return make_initfs_via_dracut(ctx)
   else:
     die('Unable to make initfs')
 
@@ -1382,7 +1382,8 @@ def setup_auto_tpm_decrypt():
   ensure_packages_that_are_used_in_chroot_are_installed()
   die_if_no_usable_tpm_slots()
 
-  workspace_dir = tempfile.mkdtemp(prefix='workspace_')
+  ctx = type('Context', (), {})()
+  ctx.workspace_dir = tempfile.mkdtemp(prefix='workspace_')
 
   if was_autorun:
     print('Finding kernel to use for EFI bin')
@@ -1397,6 +1398,7 @@ def setup_auto_tpm_decrypt():
       if os.path.isfile(kernel_bin):
         print('Selected kernel:', kernel_name)
         kernel_found = True
+        ctx.kernel_name = kernel_name
         break
     if not kernel_found:
       print('Possible kernels: ' + repr(kernels))
@@ -1460,7 +1462,7 @@ def setup_auto_tpm_decrypt():
       kernel_args += ['cryptdevice=UUID=' + blkid_root_stats['UUID'] + ':tpm_encrypted_root', 'root=/dev/mapper/tpm_encrypted_root']
 
     kernel_args = shlex.join(kernel_args)
-    kernel_args_path = os.path.join(workspace_dir, 'kernel_cmdline.txt')
+    kernel_args_path = os.path.join(ctx.workspace_dir, 'kernel_cmdline.txt')
     with open(kernel_args_path, 'w') as f:
       f.write(kernel_args)
     print('Kernel cmdline:', kernel_args)
@@ -1505,26 +1507,26 @@ def setup_auto_tpm_decrypt():
                     '--quiet',
                     '--policy-pcr',
                     '--pcr-list', hash_algorithm+':'+PCR_LIST,
-                    '--policy', os.path.join(workspace_dir, 'policy.digest')], check=True)
+                    '--policy', os.path.join(ctx.workspace_dir, 'policy.digest')], check=True)
   subprocess.run(['tpm2_createprimary',
                     '--quiet',
-                    '--key-context', os.path.join(workspace_dir, 'primary.context')], check=True)
+                    '--key-context', os.path.join(ctx.workspace_dir, 'primary.context')], check=True)
   subprocess.run(['tpm2_create',
                     '--quiet',
-                    '--policy', os.path.join(workspace_dir, 'policy.digest'),
-                    '--parent-context', os.path.join(workspace_dir, 'primary.context'),
+                    '--policy', os.path.join(ctx.workspace_dir, 'policy.digest'),
+                    '--parent-context', os.path.join(ctx.workspace_dir, 'primary.context'),
                     '--sealing-input', KEY_PATH,
-                    '--public', os.path.join(workspace_dir, 'object.public'),
-                    '--private', os.path.join(workspace_dir, 'object.private')], check=True)
+                    '--public', os.path.join(ctx.workspace_dir, 'object.public'),
+                    '--private', os.path.join(ctx.workspace_dir, 'object.private')], check=True)
   subprocess.run(['tpm2_load',
                     '--quiet',
-                    '--parent-context', os.path.join(workspace_dir, 'primary.context'),
-                    '--public', os.path.join(workspace_dir, 'object.public'),
-                    '--private', os.path.join(workspace_dir, 'object.private'),
-                    '--key-context', os.path.join(workspace_dir, 'load.context')], check=True)
+                    '--parent-context', os.path.join(ctx.workspace_dir, 'primary.context'),
+                    '--public', os.path.join(ctx.workspace_dir, 'object.public'),
+                    '--private', os.path.join(ctx.workspace_dir, 'object.private'),
+                    '--key-context', os.path.join(ctx.workspace_dir, 'load.context')], check=True)
   subprocess.run(['tpm2_evictcontrol',
                     '--quiet',
-                    '--object-context', os.path.join(workspace_dir, 'load.context'),
+                    '--object-context', os.path.join(ctx.workspace_dir, 'load.context'),
                     '--hierarchy', TPM_RH_OWNER,
                     tpm_address], check=True)
 
@@ -1617,11 +1619,11 @@ def setup_auto_tpm_decrypt():
           .replace('$script_cmd', shlex.join(script_cmd)),
       )
 
-    tmp_initramfs = make_initfs(workspace_dir)
+    tmp_initramfs = make_initfs(ctx)
 
     print('Generating EFI bin')
     osrel_path = '/usr/lib/os-release'
-    tmp_efi_bin = os.path.join(workspace_dir, 'boot.efi')
+    tmp_efi_bin = os.path.join(ctx.workspace_dir, 'boot.efi')
     if should_use_secure_boot_signing():
       tmp_signed_efi_bin = tmp_efi_bin
       tmp_efi_bin += '.unsigned'
